@@ -4,8 +4,10 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Graphics2D;
 import java.time.LocalTime;
-import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 import javax.inject.Inject;
+import net.runelite.api.MenuAction;
 import net.runelite.client.ui.overlay.OverlayPanel;
 import net.runelite.client.ui.overlay.OverlayPosition;
 import net.runelite.client.ui.overlay.components.LineComponent;
@@ -13,8 +15,9 @@ import net.runelite.client.ui.overlay.components.TitleComponent;
 
 class SlayerEtaOverlay extends OverlayPanel
 {
-	private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm");
-	private static final Color SAVED_RATE_COLOUR = new Color(200, 200, 120);
+	private static final String MENU_TARGET = "Slayer ETA";
+	private static final String RESET_SESSION = "Reset session rate";
+	private static final String CLEAR_SAVED = "Clear saved rate";
 
 	private final SlayerEtaPlugin plugin;
 	private final SlayerEtaConfig config;
@@ -28,11 +31,26 @@ class SlayerEtaOverlay extends OverlayPanel
 		setPosition(OverlayPosition.TOP_LEFT);
 	}
 
+	/** Add or remove the right-click options to match the settings. */
+	void rebuildMenu()
+	{
+		removeMenuEntry(MenuAction.RUNELITE_OVERLAY, RESET_SESSION, MENU_TARGET);
+		removeMenuEntry(MenuAction.RUNELITE_OVERLAY, CLEAR_SAVED, MENU_TARGET);
+		if (config.menuResetSession())
+		{
+			addMenuEntry(MenuAction.RUNELITE_OVERLAY, RESET_SESSION, MENU_TARGET, e -> plugin.resetSessionRate());
+		}
+		if (config.menuClearSaved())
+		{
+			addMenuEntry(MenuAction.RUNELITE_OVERLAY, CLEAR_SAVED, MENU_TARGET, e -> plugin.clearSavedRate());
+		}
+	}
+
 	@Override
 	public Dimension render(Graphics2D graphics)
 	{
 		String task = plugin.getCurrentTask();
-		if (task == null)
+		if (task == null || !plugin.isVisible())
 		{
 			return null;
 		}
@@ -40,70 +58,89 @@ class SlayerEtaOverlay extends OverlayPanel
 		int left = plugin.getRemaining();
 		double kph = plugin.getEffectiveKph();
 		boolean live = plugin.hasLiveRate();
+		long secondsLeft = plugin.getEtaSeconds();
+		// Numbers worked out from the kill rate use the live or saved colour.
+		Color rateColour = live ? config.liveColour() : config.savedColour();
+		Color etaColour = secondsLeft >= 0 ? rateColour : Color.WHITE;
+
+		if (config.miniMode())
+		{
+			// Mini mode ignores the per-line options; it only has its own choice.
+			MiniContent content = config.miniContent();
+			if (content != MiniContent.KILLS_ONLY)
+			{
+				panelComponent.getChildren().add(line("ETA", etaText(secondsLeft), etaColour));
+			}
+			if (content != MiniContent.ETA_ONLY)
+			{
+				panelComponent.getChildren().add(line("Left", String.valueOf(left), Color.WHITE));
+			}
+			return super.render(graphics);
+		}
+
+		List<LineComponent> lines = new ArrayList<>();
+
+		if (config.showTask())
+		{
+			lines.add(line(task, left + " left", Color.WHITE));
+		}
+
+		if (config.showKph() && kph > 0)
+		{
+			lines.add(line(live ? "Kills/hr" : "Kills/hr (saved)", String.valueOf(Math.round(kph)), rateColour));
+		}
+
+		if (config.showEta())
+		{
+			lines.add(line("ETA", etaText(secondsLeft), etaColour));
+		}
+
+		if (config.showFinishTime() && secondsLeft >= 0)
+		{
+			lines.add(line("Done at", LocalTime.now().plusSeconds(secondsLeft)
+				.format(config.clockFormat().getFormatter()), rateColour));
+		}
+
+		if (config.showTimeOnTask())
+		{
+			long onTaskMs = plugin.getTimeOnTaskMs();
+			lines.add(line("Time on task",
+				onTaskMs >= 0 ? EtaMath.formatEta(onTaskMs / 1000, config.etaFormat()) : "-", Color.WHITE));
+		}
+
+		if (lines.isEmpty())
+		{
+			// Every line is switched off (or has nothing to show): draw nothing at all.
+			return null;
+		}
 
 		panelComponent.getChildren().add(TitleComponent.builder()
 			.text("Slayer ETA")
 			.build());
-
-		panelComponent.getChildren().add(LineComponent.builder()
-			.left(task)
-			.right(left + " left")
-			.build());
-
-		if (kph <= 0)
-		{
-			panelComponent.getChildren().add(LineComponent.builder()
-				.left("ETA")
-				.right(plugin.getKillsUntilLiveRate() + " more kills")
-				.build());
-			return super.render(graphics);
-		}
-
-		// Colour the numbers differently while still running on a rate
-		// remembered from a previous session.
-		Color colour = live ? Color.WHITE : SAVED_RATE_COLOUR;
-
-		if (config.showKph())
-		{
-			panelComponent.getChildren().add(LineComponent.builder()
-				.left(live ? "Kills/hr" : "Kills/hr (saved)")
-				.right(String.valueOf(Math.round(kph)))
-				.rightColor(colour)
-				.build());
-		}
-
-		long secondsLeft = Math.round(left * 3600d / kph);
-		panelComponent.getChildren().add(LineComponent.builder()
-			.left("ETA")
-			.right(formatDuration(secondsLeft))
-			.rightColor(colour)
-			.build());
-
-		if (config.showFinishTime())
-		{
-			panelComponent.getChildren().add(LineComponent.builder()
-				.left("Done at")
-				.right(LocalTime.now().plusSeconds(secondsLeft).format(CLOCK))
-				.rightColor(colour)
-				.build());
-		}
-
+		panelComponent.getChildren().addAll(lines);
 		return super.render(graphics);
 	}
 
-	static String formatDuration(long totalSeconds)
+	private static LineComponent line(String left, String right, Color rightColour)
 	{
-		long hours = totalSeconds / 3600;
-		long minutes = (totalSeconds % 3600) / 60;
-		long seconds = totalSeconds % 60;
-		if (hours > 0)
+		return LineComponent.builder()
+			.left(left)
+			.right(right)
+			.rightColor(rightColour)
+			.build();
+	}
+
+	private String etaText(long secondsLeft)
+	{
+		if (secondsLeft >= 0)
 		{
-			return hours + "h " + minutes + "m";
+			return EtaMath.formatEta(secondsLeft, config.etaFormat());
 		}
-		if (minutes > 0)
+		int more = plugin.getKillsUntilLiveRate();
+		if (more <= 0)
 		{
-			return minutes + "m " + seconds + "s";
+			return "-";
 		}
-		return seconds + "s";
+		return more == 1 ? "1 more kill" : more + " more kills";
 	}
 }
